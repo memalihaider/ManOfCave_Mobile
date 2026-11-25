@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "886275055938",
+    "project_id": "manofcave-v1",
+    "storage_bucket": "manofcave-v1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:886275055938:android:0ddc88710006f43304e8db",
+        "android_client_info": {
+          "package_name": "com.manofcave"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB-OjUxA5GetzEWLfoc7XSamM-JRtsD5TU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

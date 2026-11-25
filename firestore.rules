@@ -1,0 +1,446 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    // Role is stored on Firestore users/{uid}; JWT custom claims are often unset.
+    function resolvedRole() {
+      return signedIn() && exists(userPath())
+        ? get(userPath()).data.role
+        : (signedIn() && 'role' in request.auth.token ? request.auth.token.role : '');
+    }
+
+    function isSuperAdmin() {
+      return resolvedRole() == 'super_admin';
+    }
+
+    function isBranchAdmin() {
+      return resolvedRole() == 'admin' || resolvedRole() == 'branch_admin';
+    }
+
+    function isStaff() {
+      return isSuperAdmin() || isBranchAdmin();
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function ownsCustomerField() {
+      return signedIn()
+        && (
+          resource.data.customerId == request.auth.uid
+          || resource.data.userId == request.auth.uid
+          || resource.data.uid == request.auth.uid
+        );
+    }
+
+    function createsOwnCustomerField() {
+      return signedIn()
+        && (
+          request.resource.data.customerId == request.auth.uid
+          || request.resource.data.userId == request.auth.uid
+          || request.resource.data.uid == request.auth.uid
+        );
+    }
+
+    // Self profile updates may not escalate role.
+    function selfUserUpdateSafe(userId) {
+      return isSelf(userId)
+        && (
+          !('role' in request.resource.data)
+          || !('role' in resource.data)
+          || request.resource.data.role == resource.data.role
+        );
+    }
+
+    function staffUserUpdateSafe() {
+      return !('role' in request.resource.data)
+        || !('role' in resource.data)
+        || request.resource.data.role == resource.data.role;
+    }
+
+    // Public website catalog / CMS (home, services, products, booking).
+    match /cms_hero_slides/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /cms_sections/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /cms_settings/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /cms_page_heroes/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /branches/{id} {
+      // Public branch list for booking; payment secrets must not live on this doc (see A3).
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /services/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /products/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /categories/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /staff/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    // Staff identity documents (Emirates ID / Passport) — staff-only, never public like /staff.
+    match /staffDocuments/{staffId} {
+      allow read, write: if isStaff();
+    }
+    // Expiry-alert bookkeeping — written by the server cron only.
+    match /staffDocumentAlerts/{id} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+    match /cashiers/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.keys().hasAll(['name', 'nameKey'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2;
+      allow update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+    match /memberships/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /membershipOffers/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /promoCodes/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /offers/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /blog/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /blogs/{id} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+    match /cashbackPrograms/{id} {
+      allow read: if isStaff();
+      allow write: if isStaff();
+    }
+    // Loyalty catalog / program docs — staff write; customers may read their own doc.
+    match /loyaltyPoints/{id} {
+      allow read: if isStaff()
+        || isSelf(id)
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow write: if isStaff();
+    }
+
+    // Mobile app ledger (points earn/redeem). Money mutations stay staff/Admin SDK only.
+    match /loyaltyTransactions/{txnId} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Public branding/tax settings only. Secrets belong in general/secrets (staff write, no client read)
+    // or server env — never on anonymously readable docs.
+    match /general/{docId} {
+      allow read: if docId == 'settings'
+        || (signedIn() && docId != 'secrets' && docId != 'emailConfig')
+        || (isStaff() && (docId == 'emailConfig' || docId == 'secrets'));
+      allow write: if isStaff();
+    }
+
+    // Auth / dual customer profiles in users collection.
+    match /users/{userId} {
+      allow read: if isStaff() || isSelf(userId);
+      allow create: if isStaff()
+        || (isSelf(userId)
+          && (!('role' in request.resource.data)
+            || request.resource.data.role == 'customer'));
+      allow update: if isSuperAdmin()
+        || (isStaff() && staffUserUpdateSafe())
+        || selfUserUpdateSafe(userId);
+      allow delete: if isSuperAdmin();
+
+      // Mobile FCM device tokens (self-managed).
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isStaff() || isSelf(userId);
+      }
+
+      // In-app notification inbox (Cloud Functions write via Admin SDK).
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isStaff() || isSelf(userId);
+        allow create: if isStaff() || isSelf(userId);
+      }
+    }
+
+    // Global customer identity — staff manage; mobile signup may create/update own customer doc.
+    match /customers/{customerId} {
+      allow read: if isStaff() || isSelf(customerId);
+      allow create: if isStaff()
+        || (isSelf(customerId)
+          && (!('role' in request.resource.data)
+            || request.resource.data.role == 'customer'));
+      allow update: if isStaff()
+        || (isSelf(customerId)
+          && (
+            !('role' in request.resource.data)
+            || !('role' in resource.data)
+            || request.resource.data.role == resource.data.role
+          )
+          && (
+            !('role' in request.resource.data)
+            || request.resource.data.role == 'customer'
+          ));
+      allow delete: if isSuperAdmin();
+    }
+
+    // Bookings are staff-operated; customers may read/create their own visits.
+    match /bookings/{bookingId} {
+      allow read: if isStaff()
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create: if isStaff()
+        || (signedIn()
+          && request.resource.data.customerId == request.auth.uid);
+      allow update: if isStaff()
+        || (signedIn()
+          && resource.data.customerId == request.auth.uid
+          && request.resource.data.customerId == resource.data.customerId);
+      allow delete: if isSuperAdmin();
+    }
+
+    // Money: staff-only writes. Customers may only read their own wallet / ledger.
+    match /wallets/{walletId} {
+      allow read: if isStaff()
+        || isSelf(walletId)
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /walletTransactions/{txnId} {
+      allow read: if isStaff()
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Legacy ledger — staff write; customer own-read. Prefer walletTransactions for new money.
+    match /transactions/{txnId} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create: if isStaff()
+        || (createsOwnCustomerField()
+          && request.resource.data.type in ['order', 'product_order', 'payment']);
+      allow update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Voucher — separate stored-value account (own balance + ledger). Never mixed with wallets.
+    match /vouchers/{customerId} {
+      allow read: if isStaff()
+        || isSelf(customerId)
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /voucherTransactions/{txnId} {
+      allow read: if isStaff()
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Per-visit voucher hold (idempotent close / reopen moves).
+    match /voucherVisitCharges/{chargeId} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    // Website booking REQUESTS — created/approved only by server routes (Admin SDK).
+    // Staff read them in the calendar bell; no client may write (no self-approval).
+    match /websiteBookingRequests/{requestId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    match /walletDebitGuards/{guardId} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin() || isStaff();
+    }
+
+    match /wallet_pending_topups/{id} {
+      allow read, write: if isStaff();
+    }
+
+    // Custom product invoices — staff create/update; only super admin may delete.
+    match /customInvoices/{invoiceId} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create: if isStaff() || createsOwnCustomerField();
+      allow update: if isStaff()
+        || (ownsCustomerField()
+          && request.resource.data.customerId == resource.data.customerId);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /cart/{cartId} {
+      allow read: if isStaff() || isSelf(cartId)
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+      allow create: if isStaff() || isSelf(cartId)
+        || (signedIn() && request.resource.data.customerId == request.auth.uid);
+      allow update, delete: if isStaff() || isSelf(cartId)
+        || (signedIn() && resource.data.customerId == request.auth.uid);
+    }
+
+    match /manualExpenses/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isStaff();
+    }
+
+    match /attendance/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+    match /attendance_applications/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+    match /staff_rosters/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /activityLogs/{id} {
+      allow read, create: if isStaff();
+      allow update, delete: if isSuperAdmin();
+    }
+
+    match /pos_checkouts/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /adminMessages/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+    match /branchMessages/{id} {
+      allow read, create, update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+    match /customerMessages/{id} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create: if isStaff() || createsOwnCustomerField();
+      allow update: if isStaff() || ownsCustomerField();
+      allow delete: if isStaff();
+    }
+    match /customerReplies/{id} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create, update: if isStaff() || createsOwnCustomerField();
+      allow delete: if isStaff();
+    }
+    match /feedbacks/{id} {
+      allow read: if isStaff() || ownsCustomerField();
+      allow create: if isStaff() || createsOwnCustomerField();
+      allow update: if isStaff();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /phoneLocks/{id} {
+      allow read, write: if isStaff();
+    }
+
+    match /payment_webhooks/{id} {
+      allow read, write: if isStaff();
+    }
+
+    match /invoiceShares/{id} {
+      allow read, write: if isStaff();
+    }
+
+    // Mobile TotalPay payment sessions — customer owns via customerId/uid.
+    match /payments/{paymentId} {
+      allow read: if isStaff() || ownsCustomerField()
+        || (signedIn() && resource.data.createdBy == request.auth.uid);
+      allow create: if isStaff()
+        || (signedIn()
+          && (
+            request.resource.data.customerId == request.auth.uid
+            || request.resource.data.uid == request.auth.uid
+            || request.resource.data.createdBy == request.auth.uid
+          ));
+      allow update: if isStaff()
+        || (signedIn()
+          && (
+            resource.data.customerId == request.auth.uid
+            || resource.data.uid == request.auth.uid
+            || resource.data.createdBy == request.auth.uid
+          ));
+      allow delete: if isSuperAdmin();
+    }
+
+    // Mobile chat rooms — participants or staff.
+    function isChatParticipant() {
+      return signedIn()
+        && request.auth.uid in resource.data.participants;
+    }
+
+    function createsChatAsParticipant() {
+      return signedIn()
+        && request.auth.uid in request.resource.data.participants;
+    }
+
+    match /chatRooms/{roomId} {
+      allow read: if isStaff() || isChatParticipant();
+      allow create: if isStaff() || createsChatAsParticipant();
+      allow update: if isStaff() || isChatParticipant();
+      allow delete: if isSuperAdmin() || isStaff();
+
+      match /messages/{messageId} {
+        allow read: if isStaff()
+          || (signedIn()
+            && request.auth.uid in get(/databases/$(database)/documents/chatRooms/$(roomId)).data.participants);
+        allow create: if isStaff()
+          || (signedIn()
+            && request.auth.uid in get(/databases/$(database)/documents/chatRooms/$(roomId)).data.participants
+            && request.resource.data.senderId == request.auth.uid);
+        allow update, delete: if isStaff()
+          || (signedIn()
+            && request.auth.uid in get(/databases/$(database)/documents/chatRooms/$(roomId)).data.participants);
+      }
+    }
+
+    // Default deny — no catch-all.
+  }
+}
